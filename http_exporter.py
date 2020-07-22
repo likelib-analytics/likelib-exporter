@@ -24,9 +24,8 @@ def send_query(
         data=json.dumps(data)
     )
 
-    if resp.status_code != 200:
-        raise Exception('Invalid status code:', resp.status_code)
-    return json.loads(resp.text)
+    assert resp.status_code == 200, ('Invalid status code:', resp.status_code)
+    return resp.json()
 
 
 def get_block(
@@ -41,15 +40,15 @@ def get_block(
     block_data = send_query('/get_block', {'number': b_number})
 
     if block_data['status'] == 'error':
-        if block_data['result'] == f'Block was not found. number: {b_number}':
-            if wait_block_policy == 'wait':
-                logging.info('Waiting for the block...')
-                sleep(sleep_time)
-                get_block(b_number, sleep_time)
-            else:
-                return False
+        assert block_data['result'] == f'Block was not found. number: {b_number}', \
+            ('Unknown result:', block_data['result'])
+        # if block is not mined yet:
+        if wait_block_policy == 'wait':
+            logging.info('Waiting for the block...')
+            sleep(sleep_time)
+            get_block(b_number, sleep_time)
         else:
-            raise Exception('Unknown result:', block_data['result'])
+            return False
 
     return block_data['result']
 
@@ -76,7 +75,7 @@ def parse_transaction_data(block_raw: dict):
 
     for trx in block_raw['transactions']:
         if block_raw['depth'] == 0:
-            trx_hash = 'genesis'
+            trx_hash = 'genesis'  # trxHash in genesis block is None
         else:
             trx_hashes = get_address_transactions(trx['from'])
             trx_hash = find_trx_with_ts(trx_hashes, trx['timestamp'])
@@ -97,8 +96,8 @@ def parse_transaction_data(block_raw: dict):
 
 
 def find_trx_with_ts(hashes: list, ts: int):
-    ''' Iterates over all address's transactions and finds thansaction with timestamp corresponding to
-        current block's timestamp. In order to minimize amount of quiries to LikeLib node saves transaction
+    ''' Iterates over all addresses' transactions and finds transaction with timestamp corresponding to
+        current block's timestamp. In order to minimize amount of queries to LikeLib node saves transaction
         hashes from previous transactions.
         TODO: Once the node's interface is changed, remove this part.
     '''
@@ -151,7 +150,7 @@ def exporter(
 ):
     ''' Exports blocks from LikeLib node into local database. '''
     if exit_block:
-        assert start_block < exit_block
+        assert start_block < exit_block, 'Wrong exit_block is supplied!'
 
     while True:
         block = get_block(start_block, wait_block_policy=wait_block_policy)
