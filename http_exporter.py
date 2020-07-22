@@ -154,6 +154,8 @@ def exporter(
 
     while True:
         block = get_block(start_block, wait_block_policy=wait_block_policy)
+        if start_block % 100 == 0:
+            logging.info(f'Processed blocks till block {start_block}. Continuing...')
         if block:
             parse_save_block(block)
         else:
@@ -169,3 +171,7 @@ def exporter(
 def main():
     logging.info(f'Running exporter from block: {START_BLOCK}')
     exporter(START_BLOCK, wait_block_policy=WAIT_BLOCK_POLICY)
+
+
+if __name__ == '__main__':
+    main()
