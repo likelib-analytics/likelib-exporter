@@ -1,14 +1,27 @@
+import sys
 import json
+import hashlib
 import logging
 import requests as r
 from time import sleep
-from clickhouse_driver import Client
+from kafka import KafkaProducer
 
-from config import LKL_HOST, CH_HOST, START_BLOCK, WAIT_BLOCK_POLICY
+from config import \
+    LKL_HOST, \
+    BOOTSTRAP_SERVERS, \
+    START_BLOCK, \
+    SLEEP_TIME, \
+    KAFKA_TOPIC_BLOCKS, \
+    KAFKA_TOPIC_TRANSACTIONS
 
 
-client = Client(host=CH_HOST)
+# common logs
 logging.basicConfig(level=logging.INFO)
+# kafka logs
+logger = logging.getLogger('kafka')
+logger.addHandler(logging.StreamHandler(sys.stdout))
+logger.setLevel(logging.DEBUG)
+
 known_hashes = ()
 
 
@@ -28,27 +41,16 @@ def send_query(
     return resp.json()
 
 
-def get_block(
-    b_number: int,
-    sleep_time: int = 1,
-    wait_block_policy: str = 'wait'
-):
-    ''' Gets block by number. If the the block is not mined yet and `wait_block_policy` == 'wait',
-        wait for new block `sleep_time` seconds and repeats itself.
-        If `wait_block_policy` != 'wait', stops the exporter.
-    '''
+def get_block(b_number: int,):
+    ''' Gets block by number. If the the block is not mined yet, returns None.'''
     block_data = send_query('/get_block', {'number': b_number})
 
     if block_data['status'] == 'error':
-        assert block_data['result'] == f'Block was not found. number: {b_number}', \
+        assert block_data['result'] == f'Block was not found. number:{b_number}', \
             ('Unknown result:', block_data['result'])
-        # if block is not mined yet:
-        if wait_block_policy == 'wait':
-            logging.info('Waiting for the block...')
-            sleep(sleep_time)
-            get_block(b_number, sleep_time)
-        else:
-            return False
+
+        # block is not mined yet.
+        return None
 
     return block_data['result']
 
@@ -62,7 +64,7 @@ def parse_block_data(block: dict):
         'previous_block_hash': block['previous_block_hash'],
         'dt': int(block['timestamp']),
     }
-    return [block_dict]
+    return block_dict
 
 
 def parse_transaction_data(block_raw: dict):
@@ -124,53 +126,56 @@ def get_address_transactions(address: str):
     return address_data['result']['transaction_hashes']
 
 
-def push_data(data, table):
-    ''' Pushes data to ClickHouse.
-        TODO: push data to kafka instead of CH.
-    '''
-    client.execute(
-        f'''INSERT INTO {table} ({', '.join(tuple(data[0].keys()))}) VALUES''',
-        data
+def push_data(data, producer, topic, key):
+    ''' Pushes data into kafka.'''
+    producer.send(
+        topic,
+        key=json.dumps(key).encode('utf-8'),
+        value=json.dumps(data).encode('utf-8')
     )
 
 
-def parse_save_block(block_raw):
+def get_kafka_key(data: dict):
+    ''' In some cases the transaction hash might correspond to a few logical transactions. (e.g.
+        miners' commission or contract calls. Using md5 as a key helps to avoid any data loss.
+    '''
+    m = hashlib.md5()
+    m.update(''.join(str(v) for v in data.values()).encode())
+    return m.hexdigest()
+
+
+def parse_save_block(block_raw, kafka_producer):
     ''' Parses block into desired data schemas. '''
     block_data = parse_block_data(block_raw)
-    push_data(block_data, table='blocks')
+    push_data(block_data, producer=kafka_producer, topic=KAFKA_TOPIC_BLOCKS, key=block_data['depth'])
 
     trx_data = parse_transaction_data(block_raw)
-    push_data(trx_data, table='transactions')
+    for trx in trx_data:
+        push_data(trx, producer=kafka_producer, topic=KAFKA_TOPIC_TRANSACTIONS, key=get_kafka_key(trx))
+    kafka_producer.flush()  # make sure all messages are delivered.
 
 
-def exporter(
-    start_block: int,
-    exit_block: [int, None] = None,
-    wait_block_policy: str = 'wait'
-):
-    ''' Exports blocks from LikeLib node into local database. '''
-    if exit_block:
-        assert start_block < exit_block, 'Wrong exit_block is supplied!'
+def exporter(start_block: int):
+    ''' Exports blocks from LikeLib node into local database.'''
 
     while True:
-        block = get_block(start_block, wait_block_policy=wait_block_policy)
-        if start_block % 100 == 0:
-            logging.info(f'Processed blocks till block {start_block}. Continuing...')
+        kafka_producer = KafkaProducer(bootstrap_servers=BOOTSTRAP_SERVERS)
+        block = get_block(start_block)
         if block:
-            parse_save_block(block)
+            parse_save_block(block, kafka_producer)
         else:
-            logging.info('Exited exporter. Last processed block:', start_block)
-            break
+            logging.info(f'Waiting for the block #{start_block}')
+            sleep(SLEEP_TIME)
+
+        if start_block % 100 == 0:
+            logging.info(f'Processed blocks till block #{start_block}. Continuing...')
 
         start_block += 1
-        if start_block == exit_block:
-            logging.info('Exiting on block:', exit_block)
-            break
 
 
 def main():
     logging.info(f'Running exporter from block: {START_BLOCK}')
-    exporter(START_BLOCK, wait_block_policy=WAIT_BLOCK_POLICY)
+    exporter(START_BLOCK)
 
 
 if __name__ == '__main__':
