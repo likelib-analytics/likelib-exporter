@@ -1,4 +1,3 @@
-import sys
 import json
 import hashlib
 import logging
@@ -12,15 +11,16 @@ from config import \
     START_BLOCK, \
     SLEEP_TIME, \
     KAFKA_TOPIC_BLOCKS, \
-    KAFKA_TOPIC_TRANSACTIONS
+    KAFKA_TOPIC_TRANSACTIONS, \
+    CH_SYNK_TABLE, \
+    CH_HOST
 
 
 # common logs
 logging.basicConfig(level=logging.INFO)
 # kafka logs
 logger = logging.getLogger('kafka')
-logger.addHandler(logging.StreamHandler(sys.stdout))
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARN)
 
 known_hashes = ()
 
@@ -173,10 +173,22 @@ def exporter(start_block: int):
         start_block += 1
 
 
-def main():
-    logging.info(f'Running exporter from block: {START_BLOCK}')
-    exporter(START_BLOCK)
+def recover_progress(host):
+    ''' Recovers progress by getting last processed block from ClickHouse. Starts with 0 if fails.'''
+    resp = r.post(url=host, data=f'SELECT max(depth) FROM {CH_SYNK_TABLE}'.encode())
+    if resp.ok:
+        return resp.json()
+
+    logging.warn("Failed to get last block from CliskHouse. Starting with block 0.")
+    return 0
+
+
+def main(start_block):
+    if not start_block:  # Recover pregress
+        start_block = recover_progress(CH_HOST)
+    logging.info(f'Running exporter from block: {start_block}')
+    exporter(start_block)
 
 
 if __name__ == '__main__':
-    main()
+    main(START_BLOCK)
