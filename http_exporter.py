@@ -21,8 +21,8 @@ logging.basicConfig(level=logging.INFO)
 # kafka logs
 logger = logging.getLogger('kafka')
 logger.setLevel(logging.WARN)
-
-known_hashes = ()
+# list of seen hashes (check comments below)
+known_hashes = set()
 
 
 def send_query(
@@ -107,9 +107,14 @@ def find_trx_with_ts(hashes: list, ts: int):
     for trx_hash in hashes:
         if trx_hash not in known_hashes:
             raw_trx = send_query(method='/get_transaction', data={'hash': trx_hash})
+            if raw_trx['result']['timestamp'] <= ts:
+                known_hashes.add(trx_hash)
             if raw_trx['result']['timestamp'] == ts:
-                known_hashes += (trx_hash, )
                 return trx_hash
+    # None of transactions are correspond to the timestamp. Most probably the block is corruted or Likelib
+    # blockchain was updated. We never faced that issue yet but in case you see that exception contact
+    # Likelib developers team in order to get details.
+    raise Exception(f'Unable to find transaction with appropriate ts: {ts}')
 
 
 def get_address_transactions(address: str):
@@ -175,19 +180,29 @@ def exporter(start_block: int):
 
 def recover_progress(host):
     ''' Recovers progress by getting last processed block from ClickHouse. Starts with 0 if fails.'''
-    resp = r.post(url=host, data=f'SELECT max(depth) FROM {CH_SYNK_TABLE}'.encode())
-    if resp.ok:
-        return resp.json()
+
+    # recover block number
+    resp_block = r.post(url=host, data=f'SELECT max(depth) FROM {CH_SYNK_TABLE}'.encode())
+    if resp_block.ok:
+        # recover transaction hashes
+        resp_trx = r.post(url=host, data=f'SELECT DISTINCT transactionHash FROM {CH_SYNK_TABLE}'.encode())
+        if resp_trx.ok:
+            global known_hashes
+            known_hashes = set(resp_trx.text.split('\n'))
+        else:
+            logging.warn('Unable to recover transaction hashes.')
+        return resp_block.json()
 
     logging.warn("Failed to get last block from CliskHouse. Starting with block 0.")
     return 0
 
 
 def main(start_block):
-    if not start_block:  # Recover pregress
+    if start_block is None:  # Recover pregress
         start_block = recover_progress(CH_HOST)
+
     logging.info(f'Running exporter from block: {start_block}')
-    exporter(start_block)
+    exporter(int(start_block))
 
 
 if __name__ == '__main__':
