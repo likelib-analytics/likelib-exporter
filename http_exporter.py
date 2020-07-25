@@ -168,14 +168,13 @@ def exporter(start_block: int):
         block = get_block(start_block)
         if block:
             parse_save_block(block, kafka_producer)
+            start_block += 1
         else:
             logging.info(f'Waiting for the block #{start_block}')
             sleep(SLEEP_TIME)
 
         if start_block % 100 == 0:
             logging.info(f'Processed blocks till block #{start_block}. Continuing...')
-
-        start_block += 1
 
 
 def recover_progress(host):
