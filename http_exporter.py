@@ -187,7 +187,18 @@ def recover_progress(host):
     # recover block number
     resp_block = r.post(url=host, data=f'SELECT max(depth) FROM {CH_SYNK_TABLE}'.encode())
     if resp_block.ok:
-        return resp_block.json() - SAFETY_MARGIN
+        # unpack latest known block
+        block = resp_block.json() - SAFETY_MARGIN
+        # recover transaction hashes
+        resp_trx = r.post(url=host, data=f'''
+            SELECT DISTINCT transactionHash FROM {CH_SYNK_TABLE} WHERE depth < {block}
+        '''.encode())
+        if resp_trx.ok:
+            global known_hashes
+            known_hashes = set(resp_trx.text.split('\n'))
+        else:
+            logging.warn('Unable to recover transaction hashes.')
+        return block
 
     logging.warn("Failed to get last block from CliskHouse. Starting with block 0.")
     return 0
