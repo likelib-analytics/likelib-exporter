@@ -13,7 +13,8 @@ from config import \
     KAFKA_TOPIC_BLOCKS, \
     KAFKA_TOPIC_TRANSACTIONS, \
     CH_SYNK_TABLE, \
-    CH_HOST
+    CH_HOST, \
+    SAFETY_MARGIN
 
 
 # common logs
@@ -187,7 +188,7 @@ def recover_progress(host):
     resp_block = r.post(url=host, data=f'SELECT max(depth) FROM {CH_SYNK_TABLE}'.encode())
     if resp_block.ok:
         # unpack latest known block
-        block = resp_block.json()
+        block = resp_block.json() - SAFETY_MARGIN
         # recover transaction hashes
         resp_trx = r.post(url=host, data=f'''
             SELECT DISTINCT transactionHash FROM {CH_SYNK_TABLE} WHERE depth < {block}
