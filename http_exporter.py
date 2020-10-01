@@ -13,7 +13,8 @@ from config import \
     KAFKA_TOPIC_BLOCKS, \
     KAFKA_TOPIC_TRANSACTIONS, \
     CH_SYNK_TABLE, \
-    CH_HOST
+    CH_HOST, \
+    SAFETY_MARGIN
 
 
 # common logs
@@ -80,7 +81,7 @@ def parse_transaction_data(block_raw: dict):
             trx_hash = 'genesis'  # trxHash in genesis block is None
         else:
             trx_hashes = get_address_transactions(trx['from'])
-            trx_hash = find_trx_with_ts(trx_hashes, trx['timestamp'])
+            trx_hash = find_trx_with_ts(trx_hashes, trx['timestamp'], trx['sign'])
 
         trx_data.append({
             'transactionHash': trx_hash,
@@ -97,7 +98,7 @@ def parse_transaction_data(block_raw: dict):
     return trx_data
 
 
-def find_trx_with_ts(hashes: list, ts: int):
+def find_trx_with_ts(hashes: list, ts: int, sign: str):
     ''' Iterates over all addresses' transactions and finds transaction with timestamp corresponding to
         current block's timestamp. In order to minimize amount of queries to LikeLib node saves transaction
         hashes from previous transactions.
@@ -107,14 +108,17 @@ def find_trx_with_ts(hashes: list, ts: int):
     for trx_hash in hashes:
         if trx_hash not in known_hashes:
             raw_trx = send_query(method='/get_transaction', data={'hash': trx_hash})
-            if raw_trx['result']['timestamp'] <= ts:
+            if raw_trx['result']['timestamp'] < ts:
+                # this transaction happened earlier, we should skip it.
                 known_hashes.add(trx_hash)
-            if raw_trx['result']['timestamp'] == ts:
+            if raw_trx['result']['timestamp'] == ts and raw_trx['result']['sign'] == sign:
+                # this is a required hash
+                known_hashes.add(trx_hash)
                 return trx_hash
     # None of transactions are correspond to the timestamp. Most probably the block is corruted or Likelib
     # blockchain was updated. We never faced that issue yet but in case you see that exception contact
     # Likelib developers team in order to get details.
-    raise Exception(f'Unable to find transaction with appropriate ts: {ts}')
+    raise Exception(f'Unable to find transaction with appropriate ts: {ts} and hash: {trx_hash}')
 
 
 def get_address_transactions(address: str):
@@ -183,14 +187,18 @@ def recover_progress(host):
     # recover block number
     resp_block = r.post(url=host, data=f'SELECT max(depth) FROM {CH_SYNK_TABLE}'.encode())
     if resp_block.ok:
+        # unpack latest known block
+        block = resp_block.json() - SAFETY_MARGIN
         # recover transaction hashes
-        resp_trx = r.post(url=host, data=f'SELECT DISTINCT transactionHash FROM {CH_SYNK_TABLE}'.encode())
+        resp_trx = r.post(url=host, data=f'''
+            SELECT DISTINCT transactionHash FROM {CH_SYNK_TABLE} WHERE depth < {block}
+        '''.encode())
         if resp_trx.ok:
             global known_hashes
             known_hashes = set(resp_trx.text.split('\n'))
         else:
             logging.warn('Unable to recover transaction hashes.')
-        return resp_block.json()
+        return block
 
     logging.warn("Failed to get last block from CliskHouse. Starting with block 0.")
     return 0
